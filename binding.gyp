@@ -11,29 +11,35 @@
         "<!@(node -p \"require('node-addon-api').include\")"
       ],
 
-      "dependencies": [
-        "<!(node -p \"require('node-addon-api').gyp\")"
-      ],
-
       "defines": [
         "NAPI_CPP_EXCEPTIONS"
-        # "BYV_ENABLE_PROFILE"
       ],
 
-      "cflags!": [
-        "-fno-exceptions"
+      "cflags_cc": [
+        "-fexceptions"
       ],
 
-      "cflags_cc!": [
-        "-fno-exceptions"
-      ],
+      "xcode_settings": {
+        "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+        "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
+        "CLANG_CXX_LIBRARY": "libc++",
+        "OTHER_CPLUSPLUSFLAGS": [
+          "-fexceptions"
+        ]
+      },
 
-      "msvs_settings": {
-        "VCCLCompilerTool": {
-          "ExceptionHandling": 1,
-          "RuntimeLibrary": 2
-        }
-      }
+      "conditions": [
+        [
+          "OS=='win'",
+          {
+            "msvs_settings": {
+              "VCCLCompilerTool": {
+                "ExceptionHandling": 1
+              }
+            }
+          }
+        ]
+      ]
     }
   ]
 }
