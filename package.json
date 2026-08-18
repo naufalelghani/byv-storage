@@ -1,0 +1,46 @@
+{
+  "name": "byv-storage",
+  "version": "1.0.0",
+  "description": "High-performance BYV v7 binary serialization format and native Node.js runtime by Naufal Elghani.",
+  "main": "./index.js",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.cjs"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.cjs",
+    "index.d.ts",
+    "binding.gyp",
+    "byv_core.cpp",
+    "byv_native_profiler.hpp",
+    "README.md",
+    "LICENSE",
+    "examples/",
+    "prebuilds/"
+  ],
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "prebuild": "prebuildify --napi --strip",
+    "install": "node-gyp-build"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.9.1",
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "node-gyp": "^13.0.1",
+    "prebuildify": "^7.0.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
