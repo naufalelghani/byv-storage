@@ -1,0 +1,133 @@
+name: BYV Native Prebuilds
+
+on:
+    push:
+        branches:
+            - main
+        tags:
+            - "v*"
+
+    pull_request:
+
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        name: ${{ matrix.name }}
+        runs-on: ${{ matrix.os }}
+
+        strategy:
+            fail-fast: false
+
+            matrix:
+                include:
+                    -
+                        name: windows-x64
+                        os: windows-2025
+
+                    -
+                        name: linux-x64
+                        os: ubuntu-24.04
+
+                    -
+                        name: linux-arm64
+                        os: ubuntu-24.04-arm
+
+                    -
+                        name: macos-x64
+                        os: macos-15-intel
+
+                    -
+                        name: macos-arm64
+                        os: macos-14
+
+        steps:
+            -
+                name: Checkout
+                uses: actions/checkout@v5
+
+            -
+                name: Setup Node
+                uses: actions/setup-node@v5
+                with:
+                    node-version: "22"
+                    cache: npm
+
+            -
+                name: Install dependencies
+                run: npm ci
+
+            -
+                name: Build Node-API prebuild
+                run: npx prebuildify --napi --strip
+
+            -
+                name: Test native addon
+                run: node -e "const byv = require('./index.cjs'); if (byv.version() !== 7) process.exit(1); console.log('BYV v' + byv.version() + ' OK')"
+
+            -
+                name: Show prebuild
+                shell: bash
+                run: |
+                    find prebuilds -type f -print
+
+            -
+                name: Upload prebuild
+                uses: actions/upload-artifact@v4
+                with:
+                    name: prebuild-${{ matrix.name }}
+                    path: prebuilds/
+                    if-no-files-found: error
+
+    package:
+        name: Assemble npm Package
+        needs: build
+        runs-on: ubuntu-24.04
+
+        steps:
+            -
+                name: Checkout
+                uses: actions/checkout@v5
+
+            -
+                name: Setup Node
+                uses: actions/setup-node@v5
+                with:
+                    node-version: "22"
+
+            -
+                name: Download prebuilds
+                uses: actions/download-artifact@v5
+                with:
+                    pattern: prebuild-*
+                    path: prebuilds
+                    merge-multiple: true
+
+            -
+                name: Show all prebuilds
+                run: |
+                    find prebuilds -type f -print
+
+            -
+                name: Verify prebuilds
+                run: |
+                    test -n "$(find prebuilds -type f -name '*.node' -print -quit)"
+
+            -
+                name: Install dependencies
+                run: npm ci
+
+            -
+                name: Pack package
+                run: npm pack
+
+            -
+                name: Upload npm package
+                uses: actions/upload-artifact@v4
+                with:
+                    name: byv-storage-package
+                    path: "*.tgz"
+                    if-no-files-found: error
