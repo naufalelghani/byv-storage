@@ -2166,7 +2166,7 @@ namespace byv
             return result;
         }
 
-        throw std::runtime_error(
+        throw ArgumentError(
             "Unsupported JavaScript value");
     }
 
@@ -2266,7 +2266,7 @@ namespace byv
             return;
         }
 
-        throw std::runtime_error("Unsupported JavaScript value");
+        throw ArgumentError("Unsupported JavaScript value");
     }
 
     static std::vector<uint8_t> serializeJSDirectPacked(
@@ -2463,7 +2463,7 @@ namespace byv
             return result;
         }
 
-        throw std::runtime_error(
+        throw ArgumentError(
             "Unsupported JavaScript value");
     }
 
