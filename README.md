@@ -212,6 +212,13 @@ console.dir(
 );
 ```
 
+The returned `valid` field is `true` only when the buffer has the `BYV7`
+magic, version 7, a payload size matching the bytes after the 10-byte header,
+and valid flags (only bits `0x01` and `0x02`, with `0x02` requiring `0x01`).
+The `version`, `byteLength`, `payloadSize`, and `flags` fields retain their
+existing shapes; `payloadSize` and `flags` are included only when the buffer
+is at least 10 bytes long.
+
 ## BYV Language
 
 BYV also includes a compact structured language designed for human-readable data definitions.
@@ -378,6 +385,9 @@ The decoder validates malformed binary input, including:
 - string dictionary IDs outside the valid range
 - VarUInt overflow
 - oversized collections
+- unknown or inconsistent flags
+- trailing data after the root value
+- excessive nesting depth
 
 Invalid boolean values are restricted to:
 
