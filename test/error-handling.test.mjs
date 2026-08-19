@@ -193,6 +193,28 @@ test("rejects cyclic JavaScript values without crashing", () => {
     );
 });
 
+test("rejects unsupported JavaScript values with TypeError", () => {
+    const inputs = [
+        Symbol("root"),
+        { value: Symbol("nested") },
+        [Symbol("array")]
+    ];
+
+    for (const [name, serialize] of [
+        ["serialize", byv.serialize],
+        ["serializeFast", byv.serializeFast]
+    ]) {
+        for (const input of inputs) {
+            expectError(
+                () => serialize(input),
+                /Unsupported JavaScript value/i,
+                TypeError,
+                `${name} unsupported value`
+            );
+        }
+    }
+});
+
 test("reports source integer overflow with line and literal", () => {
     const source = "@BYV\nvalue -> 999999999999999999999999999999";
     for (const parse of [byv.parse, byv.compile]) {

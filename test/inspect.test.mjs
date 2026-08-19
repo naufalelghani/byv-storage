@@ -50,15 +50,14 @@ test("inspect omits payload fields for short buffers", () => {
     }
 });
 
-test("inspect does not validate payload length", () => {
+test("inspect rejects payload length mismatches", () => {
     const buffer = byv.serialize({});
     const truncated = buffer.subarray(0, 13);
 
-    // A valid header is enough for inspect(), even when the payload is short.
     assert.deepEqual(
         byv.inspect(truncated),
         {
-            valid: true,
+            valid: false,
             version: 7,
             byteLength: 13,
             payloadSize: 7,
