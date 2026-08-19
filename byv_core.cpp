@@ -47,6 +47,28 @@ namespace byv
 
     static constexpr uint8_t VERSION = 7;
     static constexpr uint32_t MAX_COLLECTION_ITEMS = 1000000;
+    static constexpr uint32_t MAX_DICTIONARY_ITEMS = 1000000;
+
+    /*
+     * Recursion limit for every nested traversal (binary payloads, BYV
+     * language sources and JavaScript values). Untrusted input must not be
+     * able to exhaust the native stack, which crashes the process instead
+     * of raising a JavaScript exception.
+     */
+    static constexpr uint32_t MAX_DEPTH = 512;
+
+    static constexpr uint8_t FLAG_PACKED_KEYS = 0x01;
+    static constexpr uint8_t FLAG_STRING_DICTIONARY = 0x02;
+    static constexpr uint8_t FLAG_ALL = FLAG_PACKED_KEYS | FLAG_STRING_DICTIONARY;
+
+    static void checkDepth(uint32_t depth)
+    {
+        if (depth > MAX_DEPTH)
+        {
+            throw std::runtime_error(
+                "BYV nesting too deep");
+        }
+    }
 
     enum class Type : uint8_t
     {
@@ -549,6 +571,7 @@ namespace byv
     private:
         std::vector<Token> tokens_;
         size_t pos_ = 0;
+        uint32_t depth_ = 0;
 
         const Token &current() const
         {
@@ -675,6 +698,14 @@ namespace byv
 
         Value parseScope(int parentColumn)
         {
+            checkDepth(++depth_);
+
+            struct DepthGuard
+            {
+                uint32_t &depth;
+                ~DepthGuard() { --depth; }
+            } guard{depth_};
+
             /*
              * A scope is indentation-sensitive.  The first token of a
              * child must be indented farther than its parent.  This keeps
@@ -879,6 +910,28 @@ namespace byv
             return pos_;
         }
 
+        size_t remaining() const
+        {
+            return size_ - pos_;
+        }
+
+        /*
+         * A declared item count must be payable by the bytes that are left.
+         * Without this check a few bytes can request millions of items per
+         * nesting level, and the allocations alone exhaust memory before any
+         * item is read.
+         */
+        void ensureItems(
+            uint64_t count,
+            size_t minBytesPerItem)
+        {
+            if (count > remaining() / minBytesPerItem)
+            {
+                throw std::runtime_error(
+                    "BYV binary buffer truncated");
+            }
+        }
+
     private:
         const uint8_t *data_;
         size_t size_;
@@ -960,8 +1013,10 @@ namespace byv
         }
     }
 
-    static Value readValue(BinaryReader &reader)
+    static Value readValue(BinaryReader &reader, uint32_t depth)
     {
+        checkDepth(depth);
+
         Value value;
 
         value.type =
@@ -1023,6 +1078,9 @@ namespace byv
                     "BYV object too large");
             }
 
+            // Per entry: 4-byte key length + 1 type byte.
+            reader.ensureItems(count, 5);
+
             value.object.reserve(count);
 
             for (uint32_t i = 0; i < count; i++)
@@ -1031,7 +1089,7 @@ namespace byv
                     reader.string();
 
                 Value child =
-                    readValue(reader);
+                    readValue(reader, depth + 1);
 
                 value.object.emplace_back(
                     std::move(key),
@@ -1052,11 +1110,14 @@ namespace byv
                     "BYV array too large");
             }
 
+            // Per item: at least 1 type byte.
+            reader.ensureItems(count, 1);
+
             value.array.reserve(count);
 
             for (uint32_t i = 0; i < count; i++)
                 value.array.push_back(
-                    readValue(reader));
+                    readValue(reader, depth + 1));
 
             break;
         }
@@ -1287,8 +1348,11 @@ namespace byv
         BinaryReader &reader,
         const std::vector<std::string> &dictionary,
         const std::vector<std::string> &stringDictionary,
-        bool stringDictionaryEnabled)
+        bool stringDictionaryEnabled,
+        uint32_t depth)
     {
+        checkDepth(depth);
+
         Value value;
         value.type = static_cast<Type>(reader.byte());
 
@@ -1353,6 +1417,9 @@ namespace byv
             if (count > MAX_COLLECTION_ITEMS)
                 throw std::runtime_error("BYV object too large");
 
+            // Per entry: at least 1 key id byte + 1 type byte.
+            reader.ensureItems(count, 2);
+
             value.object.reserve(count);
 
             for (uint32_t i = 0; i < count; i++)
@@ -1365,7 +1432,8 @@ namespace byv
                     reader,
                     dictionary,
                     stringDictionary,
-                    stringDictionaryEnabled);
+                    stringDictionaryEnabled,
+                    depth + 1);
 
                 value.object.emplace_back(
                     dictionary[static_cast<size_t>(rawId)],
@@ -1381,6 +1449,8 @@ namespace byv
             if (count > MAX_COLLECTION_ITEMS)
                 throw std::runtime_error("BYV array too large");
 
+            reader.ensureItems(count, 1);
+
             value.array.reserve(count);
 
             for (uint32_t i = 0; i < count; i++)
@@ -1389,7 +1459,8 @@ namespace byv
                         reader,
                         dictionary,
                         stringDictionary,
-                        stringDictionaryEnabled));
+                        stringDictionaryEnabled,
+                        depth + 1));
             break;
         }
 
@@ -1505,6 +1576,23 @@ namespace byv
         return std::move(writer.data);
     }
 
+    /*
+     * Reject headers whose flag combination this build cannot represent, so
+     * that an unknown or inconsistent flag byte cannot silently select a
+     * different payload layout than the producer intended.
+     */
+    static void checkFlags(uint8_t flags)
+    {
+        if ((flags & ~FLAG_ALL) != 0)
+            throw std::runtime_error("BYV unknown flags");
+
+        if ((flags & FLAG_STRING_DICTIONARY) != 0 &&
+            (flags & FLAG_PACKED_KEYS) == 0)
+        {
+            throw std::runtime_error("BYV invalid flags");
+        }
+    }
+
     static Value deserialize(
         const uint8_t *data,
         size_t size)
@@ -1547,12 +1635,16 @@ namespace byv
 
         uint8_t flags = data[5];
 
-        if ((flags & 0x01) != 0)
+        checkFlags(flags);
+
+        if ((flags & FLAG_PACKED_KEYS) != 0)
         {
             uint64_t dictionaryCount = readVarUInt(reader);
 
-            if (dictionaryCount > 1000000)
+            if (dictionaryCount > MAX_DICTIONARY_ITEMS)
                 throw std::runtime_error("BYV dictionary too large");
+
+            reader.ensureItems(dictionaryCount, 4);
 
             std::vector<std::string> dictionary;
             dictionary.reserve(static_cast<size_t>(dictionaryCount));
@@ -1561,14 +1653,16 @@ namespace byv
                 dictionary.push_back(reader.string());
 
             std::vector<std::string> stringDictionary;
-            bool hasStringDictionary = (flags & 0x02) != 0;
+            bool hasStringDictionary = (flags & FLAG_STRING_DICTIONARY) != 0;
 
             if (hasStringDictionary)
             {
                 uint64_t stringDictionaryCount = readVarUInt(reader);
 
-                if (stringDictionaryCount > 1000000)
+                if (stringDictionaryCount > MAX_DICTIONARY_ITEMS)
                     throw std::runtime_error("BYV string dictionary too large");
+
+                reader.ensureItems(stringDictionaryCount, 4);
 
                 stringDictionary.reserve(static_cast<size_t>(stringDictionaryCount));
 
@@ -1580,10 +1674,11 @@ namespace byv
                 reader,
                 dictionary,
                 stringDictionary,
-                hasStringDictionary);
+                hasStringDictionary,
+                0);
         }
 
-        return readValue(reader);
+        return readValue(reader, 0);
     }
 
     /*
@@ -1591,6 +1686,39 @@ namespace byv
      * NAPI CONVERSION
      * ============================================================
      */
+
+    /*
+     * Assigning "__proto__" would run the inherited setter and let a decoded
+     * key replace the prototype of the result object, so a hostile payload
+     * could shape objects the caller never expects. Such keys become plain
+     * own data properties; every other key keeps the faster assignment.
+     */
+    static bool isUnsafeKey(const std::string &key)
+    {
+        return key == "__proto__";
+    }
+
+    static void setDecodedProperty(
+        Napi::Object &object,
+        napi_value key,
+        napi_value value,
+        bool unsafeKey)
+    {
+        if (!unsafeKey)
+        {
+            object.Set(key, value);
+            return;
+        }
+
+        object.DefineProperty(
+            Napi::PropertyDescriptor::Value(
+                key,
+                value,
+                static_cast<napi_property_attributes>(
+                    napi_writable |
+                    napi_enumerable |
+                    napi_configurable)));
+    }
 
     static Napi::Value toJS(
         Napi::Env env,
@@ -1643,9 +1771,22 @@ namespace byv
 
                 {
                     BYV_PROFILE_SCOPE("tojs.object.set");
-                    object.Set(
-                        entry.first,
-                        child);
+                    if (isUnsafeKey(entry.first))
+                    {
+                        setDecodedProperty(
+                            object,
+                            Napi::String::New(
+                                env,
+                                entry.first),
+                            child,
+                            true);
+                    }
+                    else
+                    {
+                        object.Set(
+                            entry.first,
+                            child);
+                    }
                 }
             }
 
@@ -1703,8 +1844,11 @@ namespace byv
     // - each object value is fetched exactly once
     // - preserve the production packed/string-dictionary format
     static Value convertJSValue(
-        const Napi::Value &input)
+        const Napi::Value &input,
+        uint32_t depth)
     {
+        checkDepth(depth);
+
         Value result;
 
         if (input.IsNull() || input.IsUndefined())
@@ -1765,7 +1909,7 @@ namespace byv
                 // Fetch each element exactly once.
                 Napi::Value item = array.Get(i);
                 result.array.emplace_back(
-                    convertJSValue(item));
+                    convertJSValue(item, depth + 1));
             }
 
             return result;
@@ -1802,7 +1946,7 @@ namespace byv
 
                 result.object.emplace_back(
                     std::move(key),
-                    convertJSValue(child));
+                    convertJSValue(child, depth + 1));
             }
 
             return result;
@@ -1816,8 +1960,11 @@ namespace byv
         BinaryWriter &writer,
         Napi::Value input,
         std::unordered_map<std::string, uint32_t> &ids,
-        std::vector<std::string> &dictionary)
+        std::vector<std::string> &dictionary,
+        uint32_t depth)
     {
+        checkDepth(depth);
+
         if (input.IsNull() || input.IsUndefined())
         {
             writer.byte(static_cast<uint8_t>(Type::Null));
@@ -1870,7 +2017,7 @@ namespace byv
             writer.u32(length);
 
             for (uint32_t i = 0; i < length; ++i)
-                writeJSValueDirect(writer, array.Get(i), ids, dictionary);
+                writeJSValueDirect(writer, array.Get(i), ids, dictionary, depth + 1);
 
             return;
         }
@@ -1902,7 +2049,7 @@ namespace byv
                 }
 
                 writeVarUInt(writer, id);
-                writeJSValueDirect(writer, object.Get(keyValue), ids, dictionary);
+                writeJSValueDirect(writer, object.Get(keyValue), ids, dictionary, depth + 1);
             }
 
             return;
@@ -1920,7 +2067,7 @@ namespace byv
         // The payload is written directly from JS values. This avoids
         // constructing the intermediate C++ Value tree entirely.
         BinaryWriter payload;
-        writeJSValueDirect(payload, input, ids, dictionary);
+        writeJSValueDirect(payload, input, ids, dictionary, 0);
 
         BinaryWriter writer;
         writer.data.reserve(10 + dictionary.size() * 8 + payload.data.size());
@@ -1972,8 +2119,11 @@ namespace byv
         Napi::Value input,
         std::unordered_map<std::string, uint32_t> &keyIds,
         std::vector<std::string> &keyDictionary,
-        std::unordered_map<std::string, uint64_t> &stringCounts)
+        std::unordered_map<std::string, uint64_t> &stringCounts,
+        uint32_t depth)
     {
+        checkDepth(depth);
+
         Value result;
 
         if (input.IsNull() || input.IsUndefined())
@@ -2043,7 +2193,8 @@ namespace byv
                         array.Get(i),
                         keyIds,
                         keyDictionary,
-                        stringCounts));
+                        stringCounts,
+                        depth + 1));
             }
 
             return result;
@@ -2092,7 +2243,8 @@ namespace byv
                         child,
                         keyIds,
                         keyDictionary,
-                        stringCounts));
+                        stringCounts,
+                        depth + 1));
             }
 
             return result;
@@ -2120,7 +2272,8 @@ namespace byv
                 input,
                 keyIds,
                 keyDictionary,
-                stringCounts);
+                stringCounts,
+                0);
 
         std::unordered_map<std::string, uint32_t> stringIds;
         std::vector<std::string> stringDictionary;
@@ -2235,7 +2388,7 @@ namespace byv
 
             {
                 BYV_PROFILE_SCOPE("serialize.convert");
-                root = convertJSValue(info[0]);
+                root = convertJSValue(info[0], 0);
             }
 
             BinaryWriter writer;
@@ -2421,8 +2574,11 @@ namespace byv
 
     static Napi::Value readFastLegacyValue(
         BinaryReader &reader,
-        Napi::Env env)
+        Napi::Env env,
+        uint32_t depth)
     {
+        checkDepth(depth);
+
         Type type =
             static_cast<Type>(reader.byte());
 
@@ -2489,22 +2645,33 @@ namespace byv
                     "BYV object too large");
             }
 
+            // Per entry: 4-byte key length + 1 type byte.
+            reader.ensureItems(count, 5);
+
             Napi::Object object =
                 Napi::Object::New(env);
 
             for (uint32_t i = 0; i < count; ++i)
             {
-                std::string key =
+                const std::string rawKey =
                     reader.string();
+
+                Napi::String key =
+                    Napi::String::New(
+                        env,
+                        rawKey);
 
                 Napi::Value child =
                     readFastLegacyValue(
                         reader,
-                        env);
+                        env,
+                        depth + 1);
 
-                object.Set(
+                setDecodedProperty(
+                    object,
                     key,
-                    child);
+                    child,
+                    isUnsafeKey(rawKey));
             }
 
             return object;
@@ -2521,6 +2688,9 @@ namespace byv
                     "BYV array too large");
             }
 
+            // Per item: at least 1 type byte.
+            reader.ensureItems(count, 1);
+
             Napi::Array array =
                 Napi::Array::New(
                     env,
@@ -2531,7 +2701,8 @@ namespace byv
                 Napi::Value child =
                     readFastLegacyValue(
                         reader,
-                        env);
+                        env,
+                        depth + 1);
 
                 array.Set(
                     i,
@@ -2551,9 +2722,13 @@ namespace byv
         BinaryReader &reader,
         Napi::Env env,
         const std::vector<Napi::String> &jsKeys,
+        const std::vector<bool> &jsKeyUnsafe,
         const std::vector<Napi::String> &jsStrings,
-        bool stringDictionaryEnabled)
+        bool stringDictionaryEnabled,
+        uint32_t depth)
     {
+        checkDepth(depth);
+
         Type type =
             static_cast<Type>(reader.byte());
 
@@ -2646,6 +2821,9 @@ namespace byv
                     "BYV object too large");
             }
 
+            // Per entry: at least 1 key id byte + 1 type byte.
+            reader.ensureItems(count, 2);
+
             Napi::Object object =
                 Napi::Object::New(env);
 
@@ -2665,12 +2843,16 @@ namespace byv
                         reader,
                         env,
                         jsKeys,
+                        jsKeyUnsafe,
                         jsStrings,
-                        stringDictionaryEnabled);
+                        stringDictionaryEnabled,
+                        depth + 1);
 
-                object.Set(
+                setDecodedProperty(
+                    object,
                     jsKeys[static_cast<size_t>(rawId)],
-                    child);
+                    child,
+                    jsKeyUnsafe[static_cast<size_t>(rawId)]);
             }
 
             return object;
@@ -2687,6 +2869,8 @@ namespace byv
                     "BYV array too large");
             }
 
+            reader.ensureItems(count, 1);
+
             Napi::Array array =
                 Napi::Array::New(
                     env,
@@ -2699,8 +2883,10 @@ namespace byv
                         reader,
                         env,
                         jsKeys,
+                        jsKeyUnsafe,
                         jsStrings,
-                        stringDictionaryEnabled);
+                        stringDictionaryEnabled,
+                        depth + 1);
 
                 array.Set(
                     i,
@@ -2762,25 +2948,36 @@ namespace byv
         const uint8_t flags =
             data[5];
 
-        if ((flags & 0x01) == 0)
+        checkFlags(flags);
+
+        if ((flags & FLAG_PACKED_KEYS) == 0)
         {
             // Legacy v7 payload: no dictionaries.
             return readFastLegacyValue(
                 reader,
-                env);
+                env,
+                0);
         }
 
         const uint64_t dictionaryCount =
             readVarUInt(reader);
 
-        if (dictionaryCount > 1000000)
+        if (dictionaryCount > MAX_DICTIONARY_ITEMS)
         {
             throw std::runtime_error(
                 "BYV dictionary too large");
         }
 
+        reader.ensureItems(dictionaryCount, 4);
+
         std::vector<Napi::String> jsKeys;
+        std::vector<bool> jsKeyUnsafe;
+
         jsKeys.reserve(
+            static_cast<size_t>(
+                dictionaryCount));
+
+        jsKeyUnsafe.reserve(
             static_cast<size_t>(
                 dictionaryCount));
 
@@ -2792,6 +2989,9 @@ namespace byv
             std::string key =
                 reader.string();
 
+            jsKeyUnsafe.push_back(
+                isUnsafeKey(key));
+
             jsKeys.push_back(
                 Napi::String::New(
                     env,
@@ -2799,7 +2999,7 @@ namespace byv
         }
 
         const bool hasStringDictionary =
-            (flags & 0x02) != 0;
+            (flags & FLAG_STRING_DICTIONARY) != 0;
 
         std::vector<Napi::String> jsStrings;
 
@@ -2808,11 +3008,13 @@ namespace byv
             const uint64_t stringDictionaryCount =
                 readVarUInt(reader);
 
-            if (stringDictionaryCount > 1000000)
+            if (stringDictionaryCount > MAX_DICTIONARY_ITEMS)
             {
                 throw std::runtime_error(
                     "BYV string dictionary too large");
             }
+
+            reader.ensureItems(stringDictionaryCount, 4);
 
             jsStrings.reserve(
                 static_cast<size_t>(
@@ -2837,8 +3039,10 @@ namespace byv
             reader,
             env,
             jsKeys,
+            jsKeyUnsafe,
             jsStrings,
-            hasStringDictionary);
+            hasStringDictionary,
+            0);
     }
 
     Napi::Value DeserializeFast(
