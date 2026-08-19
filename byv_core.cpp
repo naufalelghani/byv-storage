@@ -2,6 +2,7 @@
 #include "byv_native_profiler.hpp"
 
 #include <cstdint>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -687,25 +688,36 @@ namespace byv
 
             case Token::Kind::Integer:
                 value.type = Type::Int;
-                try
+
                 {
-                    value.integer = std::stoll(current().text);
-                }
-                catch (const std::out_of_range &)
-                {
-                    throw std::runtime_error(
-                        "BYV parser error at line " +
-                        std::to_string(current().line) +
-                        ": integer literal out of range: " +
-                        current().text);
-                }
-                catch (const std::invalid_argument &)
-                {
-                    throw std::runtime_error(
-                        "BYV parser error at line " +
-                        std::to_string(current().line) +
-                        ": malformed integer literal: " +
-                        current().text);
+                    const std::string &literal =
+                        current().text;
+
+                    const auto parsed =
+                        std::from_chars(
+                            literal.data(),
+                            literal.data() + literal.size(),
+                            value.integer);
+
+                    if (parsed.ec == std::errc::result_out_of_range)
+                    {
+                        throw std::runtime_error(
+                            "BYV parser error at line " +
+                            std::to_string(current().line) +
+                            ": integer literal out of range: " +
+                            literal);
+                    }
+
+                    if (parsed.ec != std::errc() ||
+                        parsed.ptr !=
+                            literal.data() + literal.size())
+                    {
+                        throw std::runtime_error(
+                            "BYV parser error at line " +
+                            std::to_string(current().line) +
+                            ": malformed integer literal: " +
+                            literal);
+                    }
                 }
                 advance();
                 return value;
@@ -1536,10 +1548,6 @@ namespace byv
         }
 
         case Type::Object:
-            if (value.object.size() > MAX_COLLECTION_ITEMS)
-                throw std::runtime_error(
-                    "BYV object too large");
-
             writer.u32(static_cast<uint32_t>(value.object.size()));
 
             for (const auto &entry : value.object)
@@ -1560,10 +1568,6 @@ namespace byv
             break;
 
         case Type::Array:
-            if (value.array.size() > MAX_COLLECTION_ITEMS)
-                throw std::runtime_error(
-                    "BYV array too large");
-
             writer.u32(static_cast<uint32_t>(value.array.size()));
 
             for (const auto &item : value.array)

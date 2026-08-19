@@ -17,23 +17,21 @@ function binary(payload, flags = 0, version = 7) {
     return result;
 }
 
-function expectError(fn, message, ErrorType = Error) {
+function expectError(fn, message, ErrorType = Error, label = "call") {
     assert.throws(fn, (error) => {
-        assert.ok(error instanceof ErrorType);
+        assert.ok(
+            error instanceof ErrorType,
+            `${label} threw ${error} instead of ${ErrorType.name}`
+        );
         if (message)
-            assert.match(error.message, message);
+            assert.match(error.message, message, `from ${label}`);
         return true;
     });
 }
 
 function expectDecodeError(buffer, message) {
-    for (const [name, decode] of decoders) {
-        expectError(
-            () => decode(buffer),
-            message
-        );
-        assert.notEqual(name, "");
-    }
+    for (const [name, decode] of decoders)
+        expectError(() => decode(buffer), message, Error, name);
 }
 
 function packed(payload, flags = 1) {
