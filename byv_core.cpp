@@ -47,6 +47,48 @@ namespace byv
 
     static constexpr uint8_t VERSION = 7;
     static constexpr uint32_t MAX_COLLECTION_ITEMS = 1000000;
+    static constexpr size_t MAX_DEPTH = 512;
+
+    struct ArgumentError : std::runtime_error
+    {
+        explicit ArgumentError(const std::string &message)
+            : std::runtime_error(message) {}
+    };
+
+#ifdef BYV_ENABLE_PROFILE
+    class ProfileGuard
+    {
+    public:
+        explicit ProfileGuard(const char *title)
+            : title_(title) {}
+
+        void begin()
+        {
+            byv_profile::begin();
+            active_ = true;
+        }
+
+        void finish()
+        {
+            if (!active_)
+                return;
+
+            byv_profile::end();
+            byv_profile::report(title_);
+            active_ = false;
+        }
+
+        ~ProfileGuard()
+        {
+            if (active_)
+                byv_profile::end();
+        }
+
+    private:
+        const char *title_;
+        bool active_ = false;
+    };
+#endif
 
     enum class Type : uint8_t
     {
@@ -540,7 +582,7 @@ namespace byv
 
             while (current().kind != Token::Kind::End)
             {
-                parseObjectEntry(root);
+                parseObjectEntry(root, 0);
             }
 
             return root;
@@ -565,7 +607,7 @@ namespace byv
 
         void advance()
         {
-            if (pos_ < tokens_.size())
+            if (pos_ + 1 < tokens_.size())
                 pos_++;
         }
 
@@ -581,8 +623,12 @@ namespace byv
             advance();
         }
 
-        void parseObjectEntry(Value &object)
+        void parseObjectEntry(Value &object, size_t depth)
         {
+            if (depth >= MAX_DEPTH)
+                throw std::runtime_error(
+                    "BYV nesting too deep");
+
             if (current().kind != Token::Kind::Identifier)
             {
                 throw std::runtime_error(
@@ -611,7 +657,9 @@ namespace byv
             {
                 advance();
 
-                Value value = parseScope(currentKeyColumn);
+                Value value = parseScope(
+                    currentKeyColumn,
+                    depth + 1);
 
                 object.object.emplace_back(
                     std::move(key),
@@ -639,13 +687,51 @@ namespace byv
 
             case Token::Kind::Integer:
                 value.type = Type::Int;
-                value.integer = std::stoll(current().text);
+                try
+                {
+                    value.integer = std::stoll(current().text);
+                }
+                catch (const std::out_of_range &)
+                {
+                    throw std::runtime_error(
+                        "BYV parser error at line " +
+                        std::to_string(current().line) +
+                        ": integer literal out of range: " +
+                        current().text);
+                }
+                catch (const std::invalid_argument &)
+                {
+                    throw std::runtime_error(
+                        "BYV parser error at line " +
+                        std::to_string(current().line) +
+                        ": malformed integer literal: " +
+                        current().text);
+                }
                 advance();
                 return value;
 
             case Token::Kind::Float:
                 value.type = Type::Float;
-                value.floating = std::stod(current().text);
+                try
+                {
+                    value.floating = std::stod(current().text);
+                }
+                catch (const std::out_of_range &)
+                {
+                    throw std::runtime_error(
+                        "BYV parser error at line " +
+                        std::to_string(current().line) +
+                        ": float literal out of range: " +
+                        current().text);
+                }
+                catch (const std::invalid_argument &)
+                {
+                    throw std::runtime_error(
+                        "BYV parser error at line " +
+                        std::to_string(current().line) +
+                        ": malformed float literal: " +
+                        current().text);
+                }
                 advance();
                 return value;
 
@@ -673,8 +759,12 @@ namespace byv
             }
         }
 
-        Value parseScope(int parentColumn)
+        Value parseScope(int parentColumn, size_t depth)
         {
+            if (depth >= MAX_DEPTH)
+                throw std::runtime_error(
+                    "BYV nesting too deep");
+
             /*
              * A scope is indentation-sensitive.  The first token of a
              * child must be indented farther than its parent.  This keeps
@@ -682,10 +772,10 @@ namespace byv
              * nesting them inside the previous object.
              */
             if (current().kind == Token::Kind::ArrayItem)
-                return parseScalarArray();
+                return parseScalarArray(depth);
 
             if (current().kind == Token::Kind::ObjectItem)
-                return parseObjectArray();
+                return parseObjectArray(depth);
 
             Value object;
             object.type = Type::Object;
@@ -693,14 +783,18 @@ namespace byv
             while (current().kind == Token::Kind::Identifier &&
                    current().column > parentColumn)
             {
-                parseObjectEntry(object);
+                parseObjectEntry(object, depth);
             }
 
             return object;
         }
 
-        Value parseScalarArray()
+        Value parseScalarArray(size_t depth)
         {
+            if (depth >= MAX_DEPTH)
+                throw std::runtime_error(
+                    "BYV nesting too deep");
+
             Value array;
 
             array.type = Type::Array;
@@ -715,8 +809,12 @@ namespace byv
             return array;
         }
 
-        Value parseObjectArray()
+        Value parseObjectArray(size_t depth)
         {
+            if (depth >= MAX_DEPTH)
+                throw std::runtime_error(
+                    "BYV nesting too deep");
+
             Value array;
             array.type = Type::Array;
 
@@ -731,7 +829,7 @@ namespace byv
                 while (current().kind == Token::Kind::Identifier &&
                        current().column > markerColumn)
                 {
-                    parseObjectEntry(object);
+                    parseObjectEntry(object, depth + 1);
                 }
 
                 array.array.push_back(std::move(object));
@@ -808,6 +906,20 @@ namespace byv
         }
     };
 
+    static uint32_t checkedPayloadSize(
+        const BinaryWriter &writer,
+        size_t payloadStart)
+    {
+        const size_t payloadSize =
+            writer.data.size() - payloadStart;
+
+        if (payloadSize > UINT32_MAX)
+            throw std::runtime_error(
+                "BYV payload too large");
+
+        return static_cast<uint32_t>(payloadSize);
+    }
+
     class BinaryReader
     {
     public:
@@ -869,6 +981,10 @@ namespace byv
                     data_ + pos_),
                 length);
 
+            if (!isValidUTF8(value))
+                throw std::runtime_error(
+                    "BYV invalid UTF-8 string");
+
             pos_ += length;
 
             return value;
@@ -879,10 +995,88 @@ namespace byv
             return pos_;
         }
 
+        size_t size() const
+        {
+            return size_;
+        }
+
+        size_t remaining() const
+        {
+            return size_ - pos_;
+        }
+
     private:
         const uint8_t *data_;
         size_t size_;
         size_t pos_ = 0;
+
+        static bool isValidUTF8(const std::string &value)
+        {
+            size_t i = 0;
+
+            while (i < value.size())
+            {
+                uint8_t first =
+                    static_cast<uint8_t>(value[i]);
+
+                if (first <= 0x7F)
+                {
+                    i++;
+                    continue;
+                }
+
+                size_t length;
+                uint32_t codePoint;
+
+                if (first >= 0xC2 && first <= 0xDF)
+                {
+                    length = 2;
+                    codePoint = first & 0x1F;
+                }
+                else if (first >= 0xE0 && first <= 0xEF)
+                {
+                    length = 3;
+                    codePoint = first & 0x0F;
+                }
+                else if (first >= 0xF0 && first <= 0xF4)
+                {
+                    length = 4;
+                    codePoint = first & 0x07;
+                }
+                else
+                {
+                    return false;
+                }
+
+                if (i + length > value.size())
+                    return false;
+
+                for (size_t j = 1; j < length; j++)
+                {
+                    uint8_t continuation =
+                        static_cast<uint8_t>(value[i + j]);
+
+                    if ((continuation & 0xC0) != 0x80)
+                        return false;
+
+                    codePoint =
+                        (codePoint << 6) |
+                        (continuation & 0x3F);
+                }
+
+                if ((length == 3 && codePoint < 0x800) ||
+                    (length == 4 && codePoint < 0x10000) ||
+                    codePoint > 0x10FFFF ||
+                    (codePoint >= 0xD800 && codePoint <= 0xDFFF))
+                {
+                    return false;
+                }
+
+                i += length;
+            }
+
+            return true;
+        }
 
         void ensure(size_t amount)
         {
@@ -896,8 +1090,27 @@ namespace byv
 
     static void writeValue(
         BinaryWriter &writer,
-        const Value &value)
+        const Value &value,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep");
+
+        if (value.type == Type::Object &&
+            value.object.size() > MAX_COLLECTION_ITEMS)
+        {
+            throw std::runtime_error(
+                "BYV object too large");
+        }
+
+        if (value.type == Type::Array &&
+            value.array.size() > MAX_COLLECTION_ITEMS)
+        {
+            throw std::runtime_error(
+                "BYV array too large");
+        }
+
         writer.byte(
             static_cast<uint8_t>(value.type));
 
@@ -943,7 +1156,10 @@ namespace byv
             for (const auto &entry : value.object)
             {
                 writer.string(entry.first);
-                writeValue(writer, entry.second);
+                writeValue(
+                    writer,
+                    entry.second,
+                    depth + 1);
             }
 
             break;
@@ -954,14 +1170,23 @@ namespace byv
                     value.array.size()));
 
             for (const auto &item : value.array)
-                writeValue(writer, item);
+                writeValue(
+                    writer,
+                    item,
+                    depth + 1);
 
             break;
         }
     }
 
-    static Value readValue(BinaryReader &reader)
+    static Value readValue(
+        BinaryReader &reader,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep");
+
         Value value;
 
         value.type =
@@ -1023,7 +1248,10 @@ namespace byv
                     "BYV object too large");
             }
 
-            value.object.reserve(count);
+            value.object.reserve(
+                std::min<size_t>(
+                    count,
+                    reader.remaining()));
 
             for (uint32_t i = 0; i < count; i++)
             {
@@ -1031,7 +1259,9 @@ namespace byv
                     reader.string();
 
                 Value child =
-                    readValue(reader);
+                    readValue(
+                        reader,
+                        depth + 1);
 
                 value.object.emplace_back(
                     std::move(key),
@@ -1052,11 +1282,16 @@ namespace byv
                     "BYV array too large");
             }
 
-            value.array.reserve(count);
+            value.array.reserve(
+                std::min<size_t>(
+                    count,
+                    reader.remaining()));
 
             for (uint32_t i = 0; i < count; i++)
                 value.array.push_back(
-                    readValue(reader));
+                    readValue(
+                        reader,
+                        depth + 1));
 
             break;
         }
@@ -1106,17 +1341,24 @@ namespace byv
     static uint64_t readVarUInt(BinaryReader &reader)
     {
         uint64_t result = 0;
-        int shift = 0;
 
         for (int i = 0; i < 10; i++)
         {
             uint8_t byte = reader.byte();
-            result |= static_cast<uint64_t>(byte & 0x7F) << shift;
+
+            if (i == 9 && ((byte & 0x80) != 0 ||
+                           (byte & 0x7E) != 0))
+            {
+                throw std::runtime_error(
+                    "BYV varuint overflow");
+            }
+
+            result |=
+                static_cast<uint64_t>(byte & 0x7F) <<
+                (i * 7);
 
             if ((byte & 0x80) == 0)
                 return result;
-
-            shift += 7;
         }
 
         throw std::runtime_error("BYV varuint overflow");
@@ -1125,8 +1367,13 @@ namespace byv
     static void collectKeys(
         const Value &value,
         std::unordered_map<std::string, uint32_t> &ids,
-        std::vector<std::string> &dictionary)
+        std::vector<std::string> &dictionary,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep; a cyclic structure may be the cause");
+
         if (value.type == Type::Object)
         {
             for (const auto &entry : value.object)
@@ -1138,20 +1385,33 @@ namespace byv
                     dictionary.push_back(entry.first);
                 }
 
-                collectKeys(entry.second, ids, dictionary);
+                collectKeys(
+                    entry.second,
+                    ids,
+                    dictionary,
+                    depth + 1);
             }
         }
         else if (value.type == Type::Array)
         {
             for (const auto &item : value.array)
-                collectKeys(item, ids, dictionary);
+                collectKeys(
+                    item,
+                    ids,
+                    dictionary,
+                    depth + 1);
         }
     }
 
     static void collectStrings(
         const Value &value,
-        std::unordered_map<std::string, uint64_t> &counts)
+        std::unordered_map<std::string, uint64_t> &counts,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep; a cyclic structure may be the cause");
+
         if (value.type == Type::String)
         {
             counts[value.string]++;
@@ -1161,12 +1421,18 @@ namespace byv
         if (value.type == Type::Object)
         {
             for (const auto &entry : value.object)
-                collectStrings(entry.second, counts);
+                collectStrings(
+                    entry.second,
+                    counts,
+                    depth + 1);
         }
         else if (value.type == Type::Array)
         {
             for (const auto &item : value.array)
-                collectStrings(item, counts);
+                collectStrings(
+                    item,
+                    counts,
+                    depth + 1);
         }
     }
 
@@ -1206,8 +1472,27 @@ namespace byv
         const Value &value,
         const std::unordered_map<std::string, uint32_t> &ids,
         const std::unordered_map<std::string, uint32_t> &stringIds,
-        bool stringDictionaryEnabled)
+        bool stringDictionaryEnabled,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep; a cyclic structure may be the cause");
+
+        if (value.type == Type::Object &&
+            value.object.size() > MAX_COLLECTION_ITEMS)
+        {
+            throw std::runtime_error(
+                "BYV object too large");
+        }
+
+        if (value.type == Type::Array &&
+            value.array.size() > MAX_COLLECTION_ITEMS)
+        {
+            throw std::runtime_error(
+                "BYV array too large");
+        }
+
         writer.byte(static_cast<uint8_t>(value.type));
 
         switch (value.type)
@@ -1251,6 +1536,10 @@ namespace byv
         }
 
         case Type::Object:
+            if (value.object.size() > MAX_COLLECTION_ITEMS)
+                throw std::runtime_error(
+                    "BYV object too large");
+
             writer.u32(static_cast<uint32_t>(value.object.size()));
 
             for (const auto &entry : value.object)
@@ -1265,11 +1554,16 @@ namespace byv
                     entry.second,
                     ids,
                     stringIds,
-                    stringDictionaryEnabled);
+                    stringDictionaryEnabled,
+                    depth + 1);
             }
             break;
 
         case Type::Array:
+            if (value.array.size() > MAX_COLLECTION_ITEMS)
+                throw std::runtime_error(
+                    "BYV array too large");
+
             writer.u32(static_cast<uint32_t>(value.array.size()));
 
             for (const auto &item : value.array)
@@ -1278,7 +1572,8 @@ namespace byv
                     item,
                     ids,
                     stringIds,
-                    stringDictionaryEnabled);
+                    stringDictionaryEnabled,
+                    depth + 1);
             break;
         }
     }
@@ -1287,8 +1582,13 @@ namespace byv
         BinaryReader &reader,
         const std::vector<std::string> &dictionary,
         const std::vector<std::string> &stringDictionary,
-        bool stringDictionaryEnabled)
+        bool stringDictionaryEnabled,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep");
+
         Value value;
         value.type = static_cast<Type>(reader.byte());
 
@@ -1353,7 +1653,10 @@ namespace byv
             if (count > MAX_COLLECTION_ITEMS)
                 throw std::runtime_error("BYV object too large");
 
-            value.object.reserve(count);
+            value.object.reserve(
+                std::min<size_t>(
+                    count,
+                    reader.remaining()));
 
             for (uint32_t i = 0; i < count; i++)
             {
@@ -1365,7 +1668,8 @@ namespace byv
                     reader,
                     dictionary,
                     stringDictionary,
-                    stringDictionaryEnabled);
+                    stringDictionaryEnabled,
+                    depth + 1);
 
                 value.object.emplace_back(
                     dictionary[static_cast<size_t>(rawId)],
@@ -1381,7 +1685,10 @@ namespace byv
             if (count > MAX_COLLECTION_ITEMS)
                 throw std::runtime_error("BYV array too large");
 
-            value.array.reserve(count);
+            value.array.reserve(
+                std::min<size_t>(
+                    count,
+                    reader.remaining()));
 
             for (uint32_t i = 0; i < count; i++)
                 value.array.push_back(
@@ -1389,7 +1696,8 @@ namespace byv
                         reader,
                         dictionary,
                         stringDictionary,
-                        stringDictionaryEnabled));
+                        stringDictionaryEnabled,
+                        depth + 1));
             break;
         }
 
@@ -1483,8 +1791,8 @@ namespace byv
         writePackedPayload(writer, root, true);
 
         uint32_t payloadSize =
-            static_cast<uint32_t>(
-                writer.data.size() -
+            checkedPayloadSize(
+                writer,
                 payloadStart);
 
         writer.data[6] =
@@ -1547,6 +1855,17 @@ namespace byv
 
         uint8_t flags = data[5];
 
+        if ((flags & ~0x03) != 0)
+            throw std::runtime_error(
+                "BYV unknown flags");
+
+        if ((flags & 0x02) != 0 &&
+            (flags & 0x01) == 0)
+        {
+            throw std::runtime_error(
+                "BYV string dictionary flag requires packed keys");
+        }
+
         if ((flags & 0x01) != 0)
         {
             uint64_t dictionaryCount = readVarUInt(reader);
@@ -1555,7 +1874,10 @@ namespace byv
                 throw std::runtime_error("BYV dictionary too large");
 
             std::vector<std::string> dictionary;
-            dictionary.reserve(static_cast<size_t>(dictionaryCount));
+            dictionary.reserve(
+                std::min<size_t>(
+                    static_cast<size_t>(dictionaryCount),
+                    reader.remaining()));
 
             for (uint64_t i = 0; i < dictionaryCount; i++)
                 dictionary.push_back(reader.string());
@@ -1570,20 +1892,35 @@ namespace byv
                 if (stringDictionaryCount > 1000000)
                     throw std::runtime_error("BYV string dictionary too large");
 
-                stringDictionary.reserve(static_cast<size_t>(stringDictionaryCount));
+                stringDictionary.reserve(
+                    std::min<size_t>(
+                        static_cast<size_t>(stringDictionaryCount),
+                        reader.remaining()));
 
                 for (uint64_t i = 0; i < stringDictionaryCount; i++)
                     stringDictionary.push_back(reader.string());
             }
 
-            return readPackedValue(
+            Value root = readPackedValue(
                 reader,
                 dictionary,
                 stringDictionary,
                 hasStringDictionary);
+
+            if (reader.position() != reader.size())
+                throw std::runtime_error(
+                    "BYV trailing data after root value");
+
+            return root;
         }
 
-        return readValue(reader);
+        Value root = readValue(reader);
+
+        if (reader.position() != reader.size())
+            throw std::runtime_error(
+                "BYV trailing data after root value");
+
+        return root;
     }
 
     /*
@@ -1594,8 +1931,13 @@ namespace byv
 
     static Napi::Value toJS(
         Napi::Env env,
-        const Value &value)
+        const Value &value,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep");
+
         switch (value.type)
         {
 
@@ -1638,7 +1980,8 @@ namespace byv
                     BYV_PROFILE_SCOPE("tojs.object.child");
                     child = toJS(
                         env,
-                        entry.second);
+                        entry.second,
+                        depth + 1);
                 }
 
                 {
@@ -1670,7 +2013,8 @@ namespace byv
                     BYV_PROFILE_SCOPE("tojs.array.child");
                     child = toJS(
                         env,
-                        value.array[i]);
+                        value.array[i],
+                        depth + 1);
                 }
 
                 {
@@ -1685,7 +2029,8 @@ namespace byv
         }
         }
 
-        return env.Null();
+        throw std::runtime_error(
+            "Unknown BYV type");
     }
 
     /*
@@ -1703,8 +2048,13 @@ namespace byv
     // - each object value is fetched exactly once
     // - preserve the production packed/string-dictionary format
     static Value convertJSValue(
-        const Napi::Value &input)
+        const Napi::Value &input,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep; a cyclic structure may be the cause");
+
         Value result;
 
         if (input.IsNull() || input.IsUndefined())
@@ -1765,7 +2115,9 @@ namespace byv
                 // Fetch each element exactly once.
                 Napi::Value item = array.Get(i);
                 result.array.emplace_back(
-                    convertJSValue(item));
+                    convertJSValue(
+                        item,
+                        depth + 1));
             }
 
             return result;
@@ -1802,7 +2154,9 @@ namespace byv
 
                 result.object.emplace_back(
                     std::move(key),
-                    convertJSValue(child));
+                    convertJSValue(
+                        child,
+                        depth + 1));
             }
 
             return result;
@@ -1972,8 +2326,13 @@ namespace byv
         Napi::Value input,
         std::unordered_map<std::string, uint32_t> &keyIds,
         std::vector<std::string> &keyDictionary,
-        std::unordered_map<std::string, uint64_t> &stringCounts)
+        std::unordered_map<std::string, uint64_t> &stringCounts,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep; a cyclic structure may be the cause");
+
         Value result;
 
         if (input.IsNull() || input.IsUndefined())
@@ -2043,7 +2402,8 @@ namespace byv
                         array.Get(i),
                         keyIds,
                         keyDictionary,
-                        stringCounts));
+                        stringCounts,
+                        depth + 1));
             }
 
             return result;
@@ -2092,7 +2452,8 @@ namespace byv
                         child,
                         keyIds,
                         keyDictionary,
-                        stringCounts));
+                        stringCounts,
+                        depth + 1));
             }
 
             return result;
@@ -2171,8 +2532,9 @@ namespace byv
             true);
 
         const uint32_t payloadSize =
-            static_cast<uint32_t>(
-                writer.data.size() - payloadStart);
+            checkedPayloadSize(
+                writer,
+                payloadStart);
 
         for (int i = 0; i < 4; ++i)
         {
@@ -2193,7 +2555,7 @@ namespace byv
         {
             if (info.Length() < 1)
             {
-                throw std::runtime_error(
+                throw ArgumentError(
                     "serializeFast() requires argument");
             }
 
@@ -2205,11 +2567,34 @@ namespace byv
                 bytes.data(),
                 bytes.size());
         }
-        catch (const std::exception &e)
+        catch (const Napi::Error &e)
+        {
+            e.ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        catch (const ArgumentError &e)
         {
             Napi::TypeError::New(
                 env,
                 e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (const std::exception &e)
+        {
+            Napi::Error::New(
+                env,
+                e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (...)
+        {
+            Napi::Error::New(
+                env,
+                "BYV internal error")
                 .ThrowAsJavaScriptException();
 
             return env.Null();
@@ -2224,11 +2609,13 @@ namespace byv
         try
         {
             if (info.Length() < 1)
-                throw std::runtime_error(
+                throw ArgumentError(
                     "serialize() requires argument");
 
 #ifdef BYV_ENABLE_PROFILE
-            byv_profile::begin();
+            ProfileGuard profile(
+                "BYV SERIALIZE PROFILE");
+            profile.begin();
 #endif
 
             Value root;
@@ -2268,8 +2655,8 @@ namespace byv
                 BYV_PROFILE_SCOPE("serialize.payload_size");
 
                 const uint32_t payloadSize =
-                    static_cast<uint32_t>(
-                        writer.data.size() -
+                    checkedPayloadSize(
+                        writer,
                         payloadStart);
 
                 for (int i = 0; i < 4; ++i)
@@ -2293,18 +2680,39 @@ namespace byv
             }
 
 #ifdef BYV_ENABLE_PROFILE
-            byv_profile::end();
-            byv_profile::report(
-                "BYV SERIALIZE PROFILE");
+            profile.finish();
 #endif
 
             return output;
         }
-        catch (const std::exception &e)
+        catch (const Napi::Error &e)
+        {
+            e.ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        catch (const ArgumentError &e)
         {
             Napi::TypeError::New(
                 env,
                 e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (const std::exception &e)
+        {
+            Napi::Error::New(
+                env,
+                e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (...)
+        {
+            Napi::Error::New(
+                env,
+                "BYV internal error")
                 .ThrowAsJavaScriptException();
 
             return env.Null();
@@ -2324,7 +2732,7 @@ namespace byv
                 !info[0].IsString())
             {
 
-                throw std::runtime_error(
+                throw ArgumentError(
                     "parse() requires BYV string");
             }
 
@@ -2345,12 +2753,35 @@ namespace byv
                 env,
                 root);
         }
+        catch (const Napi::Error &e)
+        {
+            e.ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        catch (const ArgumentError &e)
+        {
+            Napi::TypeError::New(
+                env,
+                e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
         catch (const std::exception &e)
         {
 
             Napi::Error::New(
                 env,
                 e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (...)
+        {
+            Napi::Error::New(
+                env,
+                "BYV internal error")
                 .ThrowAsJavaScriptException();
 
             return env.Null();
@@ -2370,7 +2801,7 @@ namespace byv
                 !info[0].IsString())
             {
 
-                throw std::runtime_error(
+                throw ArgumentError(
                     "compile() requires BYV source");
             }
 
@@ -2387,12 +2818,35 @@ namespace byv
                 result.data(),
                 result.size());
         }
+        catch (const Napi::Error &e)
+        {
+            e.ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        catch (const ArgumentError &e)
+        {
+            Napi::TypeError::New(
+                env,
+                e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
         catch (const std::exception &e)
         {
 
             Napi::Error::New(
                 env,
                 e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (...)
+        {
+            Napi::Error::New(
+                env,
+                "BYV internal error")
                 .ThrowAsJavaScriptException();
 
             return env.Null();
@@ -2421,8 +2875,13 @@ namespace byv
 
     static Napi::Value readFastLegacyValue(
         BinaryReader &reader,
-        Napi::Env env)
+        Napi::Env env,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep");
+
         Type type =
             static_cast<Type>(reader.byte());
 
@@ -2500,7 +2959,8 @@ namespace byv
                 Napi::Value child =
                     readFastLegacyValue(
                         reader,
-                        env);
+                        env,
+                        depth + 1);
 
                 object.Set(
                     key,
@@ -2524,14 +2984,17 @@ namespace byv
             Napi::Array array =
                 Napi::Array::New(
                     env,
-                    count);
+                    std::min<size_t>(
+                        count,
+                        reader.remaining()));
 
             for (uint32_t i = 0; i < count; ++i)
             {
                 Napi::Value child =
                     readFastLegacyValue(
                         reader,
-                        env);
+                        env,
+                        depth + 1);
 
                 array.Set(
                     i,
@@ -2552,8 +3015,13 @@ namespace byv
         Napi::Env env,
         const std::vector<Napi::String> &jsKeys,
         const std::vector<Napi::String> &jsStrings,
-        bool stringDictionaryEnabled)
+        bool stringDictionaryEnabled,
+        size_t depth = 0)
     {
+        if (depth >= MAX_DEPTH)
+            throw std::runtime_error(
+                "BYV nesting too deep");
+
         Type type =
             static_cast<Type>(reader.byte());
 
@@ -2666,7 +3134,8 @@ namespace byv
                         env,
                         jsKeys,
                         jsStrings,
-                        stringDictionaryEnabled);
+                        stringDictionaryEnabled,
+                        depth + 1);
 
                 object.Set(
                     jsKeys[static_cast<size_t>(rawId)],
@@ -2690,7 +3159,9 @@ namespace byv
             Napi::Array array =
                 Napi::Array::New(
                     env,
-                    count);
+                    std::min<size_t>(
+                        count,
+                        reader.remaining()));
 
             for (uint32_t i = 0; i < count; ++i)
             {
@@ -2700,7 +3171,8 @@ namespace byv
                         env,
                         jsKeys,
                         jsStrings,
-                        stringDictionaryEnabled);
+                        stringDictionaryEnabled,
+                        depth + 1);
 
                 array.Set(
                     i,
@@ -2762,12 +3234,29 @@ namespace byv
         const uint8_t flags =
             data[5];
 
+        if ((flags & ~0x03) != 0)
+            throw std::runtime_error(
+                "BYV unknown flags");
+
+        if ((flags & 0x02) != 0 &&
+            (flags & 0x01) == 0)
+        {
+            throw std::runtime_error(
+                "BYV string dictionary flag requires packed keys");
+        }
+
         if ((flags & 0x01) == 0)
         {
             // Legacy v7 payload: no dictionaries.
-            return readFastLegacyValue(
+            Napi::Value result = readFastLegacyValue(
                 reader,
                 env);
+
+            if (reader.position() != reader.size())
+                throw std::runtime_error(
+                    "BYV trailing data after root value");
+
+            return result;
         }
 
         const uint64_t dictionaryCount =
@@ -2781,8 +3270,10 @@ namespace byv
 
         std::vector<Napi::String> jsKeys;
         jsKeys.reserve(
-            static_cast<size_t>(
-                dictionaryCount));
+            std::min<size_t>(
+                static_cast<size_t>(
+                    dictionaryCount),
+                reader.remaining()));
 
         for (
             uint64_t i = 0;
@@ -2815,8 +3306,10 @@ namespace byv
             }
 
             jsStrings.reserve(
-                static_cast<size_t>(
-                    stringDictionaryCount));
+                std::min<size_t>(
+                    static_cast<size_t>(
+                        stringDictionaryCount),
+                    reader.remaining()));
 
             for (
                 uint64_t i = 0;
@@ -2833,12 +3326,18 @@ namespace byv
             }
         }
 
-        return readFastPackedValue(
+        Napi::Value result = readFastPackedValue(
             reader,
             env,
             jsKeys,
             jsStrings,
             hasStringDictionary);
+
+        if (reader.position() != reader.size())
+            throw std::runtime_error(
+                "BYV trailing data after root value");
+
+        return result;
     }
 
     Napi::Value DeserializeFast(
@@ -2853,7 +3352,7 @@ namespace byv
                 info.Length() < 1 ||
                 !info[0].IsBuffer())
             {
-                throw std::runtime_error(
+                throw ArgumentError(
                     "deserializeFast() requires Buffer");
             }
 
@@ -2861,7 +3360,9 @@ namespace byv
                 info[0].As<Napi::Buffer<uint8_t>>();
 
 #ifdef BYV_ENABLE_PROFILE
-            byv_profile::begin();
+            ProfileGuard profile(
+                "BYV DESERIALIZE FAST PROFILE");
+            profile.begin();
 #endif
 
             Napi::Value result;
@@ -2878,18 +3379,39 @@ namespace byv
             }
 
 #ifdef BYV_ENABLE_PROFILE
-            byv_profile::end();
-            byv_profile::report(
-                "BYV DESERIALIZE FAST PROFILE");
+            profile.finish();
 #endif
 
             return result;
+        }
+        catch (const Napi::Error &e)
+        {
+            e.ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        catch (const ArgumentError &e)
+        {
+            Napi::TypeError::New(
+                env,
+                e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
         }
         catch (const std::exception &e)
         {
             Napi::Error::New(
                 env,
                 e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (...)
+        {
+            Napi::Error::New(
+                env,
+                "BYV internal error")
                 .ThrowAsJavaScriptException();
 
             return env.Null();
@@ -2909,7 +3431,7 @@ namespace byv
                 info.Length() < 1 ||
                 !info[0].IsBuffer())
             {
-                throw std::runtime_error(
+                throw ArgumentError(
                     "deserialize() requires Buffer");
             }
 
@@ -2917,7 +3439,9 @@ namespace byv
                 info[0].As<Napi::Buffer<uint8_t>>();
 
 #ifdef BYV_ENABLE_PROFILE
-            byv_profile::begin();
+            ProfileGuard profile(
+                "BYV DESERIALIZE PROFILE");
+            profile.begin();
 #endif
 
             Value root;
@@ -2938,11 +3462,24 @@ namespace byv
             }
 
 #ifdef BYV_ENABLE_PROFILE
-            byv_profile::end();
-            byv_profile::report("BYV DESERIALIZE PROFILE");
+            profile.finish();
 #endif
 
             return result;
+        }
+        catch (const Napi::Error &e)
+        {
+            e.ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        catch (const ArgumentError &e)
+        {
+            Napi::TypeError::New(
+                env,
+                e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
         }
         catch (const std::exception &e)
         {
@@ -2950,6 +3487,15 @@ namespace byv
             Napi::Error::New(
                 env,
                 e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (...)
+        {
+            Napi::Error::New(
+                env,
+                "BYV internal error")
                 .ThrowAsJavaScriptException();
 
             return env.Null();
@@ -2969,7 +3515,7 @@ namespace byv
                 info.Length() < 1 ||
                 !info[0].IsBuffer())
             {
-                throw std::runtime_error(
+                throw ArgumentError(
                     "inspect() requires Buffer");
             }
 
@@ -2984,7 +3530,16 @@ namespace byv
                 buffer[0] == 'B' &&
                 buffer[1] == 'Y' &&
                 buffer[2] == 'V' &&
-                buffer[3] == '7';
+                buffer[3] == '7' &&
+                buffer[4] == VERSION &&
+                (static_cast<uint32_t>(buffer[6]) |
+                 (static_cast<uint32_t>(buffer[7]) << 8) |
+                 (static_cast<uint32_t>(buffer[8]) << 16) |
+                 (static_cast<uint32_t>(buffer[9]) << 24)) ==
+                    buffer.Length() - 10 &&
+                (buffer[5] & ~0x03) == 0 &&
+                ((buffer[5] & 0x02) == 0 ||
+                 (buffer[5] & 0x01) != 0);
 
             result.Set(
                 "valid",
@@ -3028,12 +3583,35 @@ namespace byv
 
             return result;
         }
+        catch (const Napi::Error &e)
+        {
+            e.ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        catch (const ArgumentError &e)
+        {
+            Napi::TypeError::New(
+                env,
+                e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
         catch (const std::exception &e)
         {
 
             Napi::Error::New(
                 env,
                 e.what())
+                .ThrowAsJavaScriptException();
+
+            return env.Null();
+        }
+        catch (...)
+        {
+            Napi::Error::New(
+                env,
+                "BYV internal error")
                 .ThrowAsJavaScriptException();
 
             return env.Null();
