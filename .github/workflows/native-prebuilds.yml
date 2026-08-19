@@ -66,7 +66,7 @@ jobs:
 
             -
                 name: Test native addon
-                run: node -e "const byv = require('./index.cjs'); if (byv.version() !== 7) process.exit(1); console.log('BYV v' + byv.version() + ' OK')"
+                run: npm test
 
             -
                 name: Show prebuild

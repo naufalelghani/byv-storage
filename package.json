@@ -27,7 +27,9 @@
   "scripts": {
     "build": "node-gyp rebuild",
     "prebuild": "prebuildify --napi --strip",
-    "install": "node-gyp-build"
+    "install": "node-gyp-build",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "test:coverage": "node --test --experimental-test-coverage \"test/**/*.test.mjs\""
   },
   "dependencies": {
     "node-addon-api": "^8.9.1",

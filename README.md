@@ -390,6 +390,19 @@ Other values are rejected.
 
 ## Testing
 
+Run the test suite after building the native addon:
+
+```bash
+npm run build
+npm test
+```
+
+To collect the built-in Node.js test coverage report:
+
+```bash
+npm run test:coverage
+```
+
 The project is tested against:
 
 - golden vectors
