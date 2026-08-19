@@ -103,6 +103,27 @@ test("serialize and serializeFast produce identical bytes", () => {
     );
 });
 
+test("string dictionaries roundtrip repeated strings through all paths", () => {
+    const values = [
+        [
+            { k: "dup" },
+            { k: "dup" },
+            { k: "dup" }
+        ],
+        {
+            a: "same",
+            b: "same",
+            c: "same",
+            d: "other"
+        }
+    ];
+
+    for (const value of values) {
+        for (const [, encode, decode] of combinations)
+            assert.deepEqual(decode(encode(value)), value);
+    }
+});
+
 test("object key insertion order survives roundtrip", () => {
     const value = { z: 1, a: 2, m: 3 };
     const result = byv.deserialize(byv.serialize(value));

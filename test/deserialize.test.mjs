@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import byv from "../index.js";
-import { legacy, withHeader } from "./helpers/binary.mjs";
+import {
+    legacy,
+    packed,
+    varUInt,
+    withHeader,
+    withPackedHeader
+} from "./helpers/binary.mjs";
 
 const decoders = [
     ["deserialize", byv.deserialize],
@@ -102,6 +108,8 @@ test("both decoders read legacy v7 values", () => {
     const cases = [
         [legacy.int(42), 42],
         [legacy.null(), null],
+        [legacy.bool(true), true],
+        [legacy.bool(false), false],
         [legacy.float(1.5), 1.5],
         [legacy.str("hi"), "hi"],
         [
@@ -124,6 +132,153 @@ test("both decoders read legacy v7 values", () => {
 
         for (const [, decode] of decoders)
             assert.deepEqual(decode(buffer), expected);
+    }
+});
+
+test("both decoders read packed values", () => {
+    const cases = [
+        [
+            withPackedHeader(
+                1,
+                ["a"],
+                [],
+                packed.obj([
+                    [0, packed.int(9)]
+                ])
+            ),
+            { a: 9 }
+        ],
+        [
+            withPackedHeader(
+                3,
+                ["k"],
+                ["v"],
+                packed.obj([
+                    [0, packed.strRef(0)]
+                ])
+            ),
+            { k: "v" }
+        ],
+        [
+            withPackedHeader(
+                3,
+                ["k"],
+                ["v"],
+                packed.obj([
+                    [0, packed.str("raw", true)]
+                ])
+            ),
+            { k: "raw" }
+        ]
+    ];
+
+    for (const [buffer, expected] of cases) {
+        for (const [, decode] of decoders)
+            assert.deepEqual(decode(buffer), expected);
+    }
+});
+
+test("packed decoders reject invalid dictionary references and markers", () => {
+    const cases = [
+        [
+            withPackedHeader(
+                1,
+                ["a"],
+                [],
+                packed.obj([
+                    [5, packed.int(9)]
+                ])
+            ),
+            "BYV packed key id out of range"
+        ],
+        [
+            withPackedHeader(
+                3,
+                ["k"],
+                ["v"],
+                packed.obj([
+                    [0, packed.strRef(7)]
+                ])
+            ),
+            "BYV packed string id out of range"
+        ],
+        [
+            withPackedHeader(
+                3,
+                ["k"],
+                ["v"],
+                packed.obj([
+                    [0, packed.strMarker(9)]
+                ])
+            ),
+            "BYV invalid string marker"
+        ]
+    ];
+
+    for (const [buffer, message] of cases) {
+        for (const [name, decode] of decoders) {
+            assert.throws(
+                () => decode(buffer),
+                { message },
+                `${name}: ${message}`
+            );
+        }
+    }
+});
+
+test("packed decoders enforce collection and dictionary limits", () => {
+    const cases = [
+        [
+            withPackedHeader(
+                1,
+                [],
+                [],
+                packed.objCount(2000000)
+            ),
+            "BYV object too large"
+        ],
+        [
+            withPackedHeader(
+                1,
+                [],
+                [],
+                packed.arrCount(2000000)
+            ),
+            "BYV array too large"
+        ],
+        [
+            withHeader(
+                3,
+                Buffer.concat([
+                    varUInt(0),
+                    Buffer.from([
+                        0xff,
+                        0xff,
+                        0xff,
+                        0xff,
+                        0x0f
+                    ])
+                ])
+            ),
+            "BYV string dictionary too large"
+        ],
+        [
+            withHeader(
+                1,
+                Buffer.alloc(10, 0x80)
+            ),
+            "BYV varuint overflow"
+        ]
+    ];
+
+    for (const [buffer, message] of cases) {
+        for (const [name, decode] of decoders) {
+            assert.throws(
+                () => decode(buffer),
+                { message },
+                `${name}: ${message}`
+            );
+        }
     }
 });
 
