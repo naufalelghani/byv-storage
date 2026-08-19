@@ -1933,6 +1933,32 @@ namespace byv
      * ============================================================
      */
 
+    /*
+     * Assigning "__proto__" would run the inherited setter and let a decoded
+     * key replace the prototype of the result object, so a hostile payload
+     * could shape objects the caller never expects. Such keys become plain
+     * own data properties; every other key keeps the faster assignment.
+     */
+    static bool isUnsafeKey(const std::string &key)
+    {
+        return key == "__proto__";
+    }
+
+    static void defineDecodedProperty(
+        Napi::Object &object,
+        napi_value key,
+        napi_value value)
+    {
+        object.DefineProperty(
+            Napi::PropertyDescriptor::Value(
+                key,
+                value,
+                static_cast<napi_property_attributes>(
+                    napi_writable |
+                    napi_enumerable |
+                    napi_configurable)));
+    }
+
     static Napi::Value toJS(
         Napi::Env env,
         const Value &value,
@@ -1990,9 +2016,22 @@ namespace byv
 
                 {
                     BYV_PROFILE_SCOPE("tojs.object.set");
-                    object.Set(
-                        entry.first,
-                        child);
+
+                    if (isUnsafeKey(entry.first))
+                    {
+                        defineDecodedProperty(
+                            object,
+                            Napi::String::New(
+                                env,
+                                entry.first),
+                            child);
+                    }
+                    else
+                    {
+                        object.Set(
+                            entry.first,
+                            child);
+                    }
                 }
             }
 
@@ -2966,9 +3005,21 @@ namespace byv
                         env,
                         depth + 1);
 
-                object.Set(
-                    key,
-                    child);
+                if (isUnsafeKey(key))
+                {
+                    defineDecodedProperty(
+                        object,
+                        Napi::String::New(
+                            env,
+                            key),
+                        child);
+                }
+                else
+                {
+                    object.Set(
+                        key,
+                        child);
+                }
             }
 
             return object;
@@ -3018,6 +3069,7 @@ namespace byv
         BinaryReader &reader,
         Napi::Env env,
         const std::vector<Napi::String> &jsKeys,
+        const std::vector<bool> &jsKeyUnsafe,
         const std::vector<Napi::String> &jsStrings,
         bool stringDictionaryEnabled,
         size_t depth = 0)
@@ -3137,13 +3189,27 @@ namespace byv
                         reader,
                         env,
                         jsKeys,
+                        jsKeyUnsafe,
                         jsStrings,
                         stringDictionaryEnabled,
                         depth + 1);
 
-                object.Set(
-                    jsKeys[static_cast<size_t>(rawId)],
-                    child);
+                const size_t keyIndex =
+                    static_cast<size_t>(rawId);
+
+                if (jsKeyUnsafe[keyIndex])
+                {
+                    defineDecodedProperty(
+                        object,
+                        jsKeys[keyIndex],
+                        child);
+                }
+                else
+                {
+                    object.Set(
+                        jsKeys[keyIndex],
+                        child);
+                }
             }
 
             return object;
@@ -3174,6 +3240,7 @@ namespace byv
                         reader,
                         env,
                         jsKeys,
+                        jsKeyUnsafe,
                         jsStrings,
                         stringDictionaryEnabled,
                         depth + 1);
@@ -3273,11 +3340,16 @@ namespace byv
         }
 
         std::vector<Napi::String> jsKeys;
+        std::vector<bool> jsKeyUnsafe;
+
         jsKeys.reserve(
             std::min<size_t>(
                 static_cast<size_t>(
                     dictionaryCount),
                 reader.remaining()));
+
+        jsKeyUnsafe.reserve(
+            jsKeys.capacity());
 
         for (
             uint64_t i = 0;
@@ -3286,6 +3358,9 @@ namespace byv
         {
             std::string key =
                 reader.string();
+
+            jsKeyUnsafe.push_back(
+                isUnsafeKey(key));
 
             jsKeys.push_back(
                 Napi::String::New(
@@ -3334,6 +3409,7 @@ namespace byv
             reader,
             env,
             jsKeys,
+            jsKeyUnsafe,
             jsStrings,
             hasStringDictionary);
 
