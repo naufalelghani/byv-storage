@@ -1,6 +1,6 @@
 {
   "name": "byv-storage",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "High-performance BYV v7 binary serialization format and native Node.js runtime by Naufal Elghani.",
   "main": "./index.js",
   "type": "module",
