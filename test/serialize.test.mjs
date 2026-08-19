@@ -207,9 +207,11 @@ test("serialization handles enumerable JavaScript properties", () => {
 test("BigInt is rejected with the native error", () => {
     assert.throws(
         () => byv.serialize(1n),
-        {
-            name: "TypeError",
-            message: "Unsupported JavaScript value"
+        (error) => {
+            assert.equal(error.constructor, Error);
+            assert.equal(error.name, "Error");
+            assert.equal(error.message, "Unsupported JavaScript value");
+            return true;
         }
     );
 });

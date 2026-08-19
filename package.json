@@ -27,7 +27,6 @@
   ],
   "scripts": {
     "build": "node-gyp rebuild",
-    "test": "node --test test/*.test.mjs",
     "prebuild": "prebuildify --napi --strip",
     "install": "node-gyp-build",
     "test": "node --test",
