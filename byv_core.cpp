@@ -2023,30 +2023,9 @@ namespace byv
 
         writePackedPayload(writer, root, true);
 
-        const size_t payloadSize =
-            writer.data.size() - payloadStart;
-
-        if (payloadSize > UINT32_MAX)
-            throw std::runtime_error(
-                "BYV payload too large");
-
-        const uint32_t checkedSize =
-            static_cast<uint32_t>(payloadSize);
-
-        writer.data[HEADER_PAYLOAD_OFFSET] =
-            static_cast<uint8_t>(checkedSize);
-
-        writer.data[HEADER_PAYLOAD_OFFSET + 1] =
-            static_cast<uint8_t>(
-                checkedSize >> 8);
-
-        writer.data[HEADER_PAYLOAD_OFFSET + 2] =
-            static_cast<uint8_t>(
-                checkedSize >> 16);
-
-        writer.data[HEADER_PAYLOAD_OFFSET + 3] =
-            static_cast<uint8_t>(
-                checkedSize >> 24);
+        patchPayloadSize(
+            writer,
+            payloadStart);
 
         return std::move(writer.data);
     }
@@ -2808,22 +2787,22 @@ namespace byv
             env,
             [&]() -> Napi::Value
             {
-                requireStringArg(
-                    info,
-                    "parse() requires BYV string");
+                const Napi::String sourceValue =
+                    requireStringArg(
+                        info,
+                        "parse() requires BYV string")
+                        .As<Napi::String>();
 
-            std::string source =
-                info[0]
-                    .As<Napi::String>()
-                    .Utf8Value();
+                std::string source =
+                    sourceValue.Utf8Value();
 
-            Lexer lexer(source);
+                Lexer lexer(source);
 
-            Parser parser(
-                lexer.tokenize());
+                Parser parser(
+                    lexer.tokenize());
 
-            Value root =
-                parser.parse();
+                Value root =
+                    parser.parse();
 
                 return toJS(
                     env,
@@ -2841,17 +2820,17 @@ namespace byv
             env,
             [&]() -> Napi::Value
             {
-                requireStringArg(
-                    info,
-                    "compile() requires BYV source");
+                const Napi::String sourceValue =
+                    requireStringArg(
+                        info,
+                        "compile() requires BYV source")
+                        .As<Napi::String>();
 
-            std::string source =
-                info[0]
-                    .As<Napi::String>()
-                    .Utf8Value();
+                std::string source =
+                    sourceValue.Utf8Value();
 
-            std::vector<uint8_t> result =
-                compile(source);
+                std::vector<uint8_t> result =
+                    compile(source);
 
                 return copyBuffer(
                     env,
@@ -3232,26 +3211,26 @@ namespace byv
                         "deserializeFast() requires Buffer");
 
 #ifdef BYV_ENABLE_PROFILE
-            ProfileGuard profile(
-                "BYV DESERIALIZE FAST PROFILE");
-            profile.begin();
+                ProfileGuard profile(
+                    "BYV DESERIALIZE FAST PROFILE");
+                profile.begin();
 #endif
 
-            Napi::Value result;
+                Napi::Value result;
 
-            {
-                BYV_PROFILE_SCOPE(
-                    "deserializeFast.direct_js");
+                {
+                    BYV_PROFILE_SCOPE(
+                        "deserializeFast.direct_js");
 
-                result =
-                    deserializeFastJS(
-                        buffer.Data(),
-                        buffer.Length(),
-                        env);
-            }
+                    result =
+                        deserializeFastJS(
+                            buffer.Data(),
+                            buffer.Length(),
+                            env);
+                }
 
 #ifdef BYV_ENABLE_PROFILE
-            profile.finish();
+                profile.finish();
 #endif
 
                 return result;
@@ -3274,30 +3253,30 @@ namespace byv
                         "deserialize() requires Buffer");
 
 #ifdef BYV_ENABLE_PROFILE
-            ProfileGuard profile(
-                "BYV DESERIALIZE PROFILE");
-            profile.begin();
+                ProfileGuard profile(
+                    "BYV DESERIALIZE PROFILE");
+                profile.begin();
 #endif
 
-            Value root;
+                Value root;
 
-            {
-                BYV_PROFILE_SCOPE("deserialize.decode");
-                root = deserialize(
-                    buffer.Data(),
-                    buffer.Length());
-            }
+                {
+                    BYV_PROFILE_SCOPE("deserialize.decode");
+                    root = deserialize(
+                        buffer.Data(),
+                        buffer.Length());
+                }
 
-            Napi::Value result;
-            {
-                BYV_PROFILE_SCOPE("deserialize.to_js");
-                result = toJS(
-                    env,
-                    root);
-            }
+                Napi::Value result;
+                {
+                    BYV_PROFILE_SCOPE("deserialize.to_js");
+                    result = toJS(
+                        env,
+                        root);
+                }
 
 #ifdef BYV_ENABLE_PROFILE
-            profile.finish();
+                profile.finish();
 #endif
 
                 return result;
@@ -3319,51 +3298,51 @@ namespace byv
                         info,
                         "inspect() requires Buffer");
 
-            Napi::Object result =
-                Napi::Object::New(env);
+                Napi::Object result =
+                    Napi::Object::New(env);
 
-            bool valid =
-                buffer.Length() >= 10 &&
-                buffer[0] == 'B' &&
-                buffer[1] == 'Y' &&
-                buffer[2] == 'V' &&
-                buffer[3] == '7' &&
-                buffer[4] == VERSION &&
-                readLittleEndianU32(
-                    buffer.Data() + HEADER_PAYLOAD_OFFSET) ==
-                    buffer.Length() - 10 &&
-                flagsValid(buffer[5]);
-
-            result.Set(
-                "valid",
-                valid);
-
-            result.Set(
-                "version",
-                buffer.Length() >= 5
-                    ? buffer[4]
-                    : 0);
-
-            result.Set(
-                "byteLength",
-                static_cast<double>(
-                    buffer.Length()));
-
-            if (buffer.Length() >= 10)
-            {
-
-                uint32_t payload =
+                bool valid =
+                    buffer.Length() >= 10 &&
+                    buffer[0] == 'B' &&
+                    buffer[1] == 'Y' &&
+                    buffer[2] == 'V' &&
+                    buffer[3] == '7' &&
+                    buffer[4] == VERSION &&
                     readLittleEndianU32(
-                        buffer.Data() + HEADER_PAYLOAD_OFFSET);
+                        buffer.Data() + HEADER_PAYLOAD_OFFSET) ==
+                        buffer.Length() - 10 &&
+                    flagsValid(buffer[5]);
 
                 result.Set(
-                    "payloadSize",
-                    payload);
+                    "valid",
+                    valid);
 
                 result.Set(
-                    "flags",
-                    buffer[5]);
-            }
+                    "version",
+                    buffer.Length() >= 5
+                        ? buffer[4]
+                        : 0);
+
+                result.Set(
+                    "byteLength",
+                    static_cast<double>(
+                        buffer.Length()));
+
+                if (buffer.Length() >= 10)
+                {
+
+                    uint32_t payload =
+                        readLittleEndianU32(
+                            buffer.Data() + HEADER_PAYLOAD_OFFSET);
+
+                    result.Set(
+                        "payloadSize",
+                        payload);
+
+                    result.Set(
+                        "flags",
+                        buffer[5]);
+                }
 
                 return result;
             });
