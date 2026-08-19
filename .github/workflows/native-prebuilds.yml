@@ -65,6 +65,10 @@ jobs:
                 run: npx prebuildify --napi --strip
 
             -
+                name: Run regression tests
+                run: npm test
+
+            -
                 name: Test native addon
                 run: npm test
 
